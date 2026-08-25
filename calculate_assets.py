@@ -38,7 +38,8 @@ ADDRESSES: list[str] = [
 DEFAULT_ADDRESS_FILE = "addresses.txt"
 DEFAULT_JSON_OUT = "portfolio.json"
 
-GOLDRUSH_BASE = "https://api.covalenthq.com/v1"
+HYPERLIQUID_INFO = "https://api.hyperliquid.xyz/info"
+HL_STABLES = {"USDC", "USDH", "USDT", "USD₮", "USD₮0", "USDE", "USD0"}
 LLAMA_PRICES = "https://coins.llama.fi/prices/current"
 ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 DOMAIN_RE = re.compile(r"^[a-zA-Z0-9.-]+\.(eth|lens|crypto|nft|wallet|dao)$", re.I)
@@ -210,6 +211,10 @@ EXPLORER_ALIASES = {
     "avalanche-mainnet": "avalanche",
     "gnosis-mainnet": "gnosis",
     "xdai": "gnosis",
+    "hyperliquid": "hyperliquid",
+    "hl": "hyperliquid",
+    "hype": "hyperliquid",
+    "hyperliquid-dex": "hyperliquid",
 }
 
 GOLDRUSH_ALIASES = {
@@ -751,22 +756,39 @@ async def build_goldrush_portfolio(addresses: list[str], args: argparse.Namespac
         )
     client = GoldRushClient(key)
     portfolio = Portfolio(addresses=list(addresses))
+    min_value = Decimal(str(args.min_value))
     try:
-        total = len(addresses)
-        for index, address in enumerate(addresses, start=1):
-            print(f"[{index}/{total}] Scanning {address} via GoldRush ...", file=sys.stderr)
-            chains = await resolve_goldrush_chains(
-                client,
-                address,
-                explicit=args.chains,
-                fast=args.fast,
-                testnets=args.testnets,
-            )
-            portfolio.scanned_chains[address] = chains
-            print(f"  {len(chains)} chain(s)", file=sys.stderr)
-            holdings, failures = await fetch_goldrush_address(client, address, chains, args)
-            portfolio.holdings.extend(holdings)
-            portfolio.failures.extend(failures)
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as http:
+            hl = HyperliquidIndex(http)
+            total = len(addresses)
+            for index, address in enumerate(addresses, start=1):
+                print(f"[{index}/{total}] Scanning {address} via GoldRush ...", file=sys.stderr)
+                chains = await resolve_goldrush_chains(
+                    client,
+                    address,
+                    explicit=args.chains,
+                    fast=args.fast,
+                    testnets=args.testnets,
+                )
+                portfolio.scanned_chains[address] = chains
+                print(f"  {len(chains)} chain(s)", file=sys.stderr)
+                holdings, failures = await fetch_goldrush_address(client, address, chains, args)
+                portfolio.holdings.extend(holdings)
+                portfolio.failures.extend(failures)
+                if want_hyperliquid(args):
+                    print("  Hyperliquid DEX ...", file=sys.stderr)
+                    hl_holdings, hl_fail = await hl.fetch_address(address)
+                    if hl_fail is not None:
+                        portfolio.failures.append(hl_fail)
+                    portfolio.holdings.extend(
+                        holding
+                        for holding in hl_holdings
+                        if keep_hyperliquid_holding(holding, min_value)
+                    )
+                    scanned = list(portfolio.scanned_chains.get(address) or [])
+                    if "hyperliquid" not in scanned:
+                        scanned.append("hyperliquid")
+                    portfolio.scanned_chains[address] = scanned
     finally:
         await client.aclose()
     portfolio.holdings.sort(key=lambda h: h.value, reverse=True)
@@ -1124,25 +1146,223 @@ async def fill_missing_prices(client: httpx.AsyncClient, holdings: list[Holding]
         holding.value = holding.amount * price
 
 
+def want_hyperliquid(args: argparse.Namespace) -> bool:
+    if getattr(args, "no_hyperliquid", False):
+        return False
+    if not args.chains:
+        return True
+    wanted = {normalize_explorer_slug(c) for c in args.chains}
+    return "hyperliquid" in wanted
+
+
+class HyperliquidIndex:
+    def __init__(self, client: httpx.AsyncClient) -> None:
+        self._client = client
+        self._mids: dict[str, Any] | None = None
+        self._token_pairs: dict[int, list[str]] | None = None
+
+    async def _info(self, payload: dict[str, Any]) -> Any:
+        response = await self._client.post(
+            HYPERLIQUID_INFO,
+            json=payload,
+            headers={"Content-Type": "application/json", "User-Agent": "calculate-assets/1.0"},
+            timeout=20.0,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def _ensure_meta(self) -> None:
+        if self._mids is not None and self._token_pairs is not None:
+            return
+        mids, meta = await asyncio.gather(
+            self._info({"type": "allMids"}),
+            self._info({"type": "spotMeta"}),
+        )
+        self._mids = mids if isinstance(mids, dict) else {}
+        pairs: dict[int, list[str]] = defaultdict(list)
+        for market in (meta or {}).get("universe") or []:
+            tokens = market.get("tokens") or []
+            name = str(market.get("name") or "")
+            if tokens and name:
+                pairs[int(tokens[0])].append(name)
+        self._token_pairs = dict(pairs)
+
+    def _spot_price(self, coin: str, token_index: int) -> Decimal:
+        symbol = (coin or "").upper()
+        if symbol in HL_STABLES:
+            return Decimal("1")
+        mids = self._mids or {}
+        for key in (coin, symbol, f"@{token_index}"):
+            price = to_decimal(mids.get(key))
+            if price > 0:
+                return price
+        for pair_name in (self._token_pairs or {}).get(token_index, []):
+            price = to_decimal(mids.get(pair_name))
+            if price > 0:
+                return price
+        return Decimal("0")
+
+    async def fetch_address(self, address: str) -> tuple[list[Holding], ChainFailure | None]:
+        if not ADDRESS_RE.fullmatch(address):
+            return [], None
+        try:
+            await self._ensure_meta()
+            perps, spot, vaults = await asyncio.gather(
+                self._info({"type": "clearinghouseState", "user": address}),
+                self._info({"type": "spotClearinghouseState", "user": address}),
+                self._info({"type": "userVaultEquities", "user": address}),
+            )
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            return [], ChainFailure(address=address, chain="Hyperliquid", error=str(exc) or type(exc).__name__)
+
+        holdings: list[Holding] = []
+        for item in (spot or {}).get("balances") or []:
+            coin = str(item.get("coin") or "UNKNOWN")
+            amount = to_decimal(item.get("total"))
+            if amount <= 0:
+                continue
+            token_index = int(item.get("token") or 0)
+            price = self._spot_price(coin, token_index)
+            full_name = coin if coin != "HYPE" else "Hyperliquid"
+            holdings.append(
+                Holding(
+                    address=address,
+                    chain_name="hyperliquid",
+                    chain_id=None,
+                    chain_display="Hyperliquid Spot",
+                    contract=f"spot:{token_index}:{coin}",
+                    symbol=coin,
+                    name=full_name,
+                    amount=amount,
+                    price=price if price > 0 else None,
+                    value=amount * price if price > 0 else Decimal("0"),
+                    native=False,
+                    spam=False,
+                    token_type="spot",
+                )
+            )
+
+        summary = (perps or {}).get("marginSummary") or {}
+        cash = to_decimal(summary.get("totalRawUsd"))
+        account_value = to_decimal(summary.get("accountValue"))
+        if cash > 0:
+            holdings.append(
+                Holding(
+                    address=address,
+                    chain_name="hyperliquid",
+                    chain_id=None,
+                    chain_display="Hyperliquid Perps",
+                    contract="perp:usdc-margin",
+                    symbol="USDC",
+                    name="Perp margin (USDC)",
+                    amount=cash,
+                    price=Decimal("1"),
+                    value=cash,
+                    native=False,
+                    spam=False,
+                    token_type="perp_margin",
+                )
+            )
+        for entry in (perps or {}).get("assetPositions") or []:
+            position = entry.get("position") or {}
+            coin = str(position.get("coin") or "UNKNOWN")
+            size = to_decimal(position.get("szi"))
+            if size == 0:
+                continue
+            pnl = to_decimal(position.get("unrealizedPnl"))
+            notional = to_decimal(position.get("positionValue")).copy_abs()
+            mark = notional / size.copy_abs() if size != 0 and notional > 0 else to_decimal((self._mids or {}).get(coin))
+            side = "Long" if size > 0 else "Short"
+            holdings.append(
+                Holding(
+                    address=address,
+                    chain_name="hyperliquid",
+                    chain_id=None,
+                    chain_display="Hyperliquid Perps",
+                    contract=f"perp:{coin}:{side.lower()}",
+                    symbol=f"{coin}-PERP",
+                    name=f"{coin} Perp {side}",
+                    amount=size.copy_abs(),
+                    price=mark if mark > 0 else None,
+                    value=pnl,
+                    native=False,
+                    spam=False,
+                    token_type="perp",
+                )
+            )
+        # If there is equity but no cash/positions parsed, keep account value so it isn't dropped.
+        if account_value > 0 and not any(h.token_type in {"perp_margin", "perp"} for h in holdings):
+            holdings.append(
+                Holding(
+                    address=address,
+                    chain_name="hyperliquid",
+                    chain_id=None,
+                    chain_display="Hyperliquid Perps",
+                    contract="perp:account-equity",
+                    symbol="USDC",
+                    name="Perp account equity",
+                    amount=account_value,
+                    price=Decimal("1"),
+                    value=account_value,
+                    native=False,
+                    spam=False,
+                    token_type="perp_margin",
+                )
+            )
+
+        for vault in vaults or []:
+            if not isinstance(vault, dict):
+                continue
+            equity = to_decimal(vault.get("equity") or vault.get("value") or vault.get("vaultEquity"))
+            if equity <= 0:
+                continue
+            vault_addr = str(vault.get("vaultAddress") or vault.get("vault") or "vault")
+            holdings.append(
+                Holding(
+                    address=address,
+                    chain_name="hyperliquid",
+                    chain_id=None,
+                    chain_display="Hyperliquid Vaults",
+                    contract=f"vault:{vault_addr.lower()}",
+                    symbol="USDC",
+                    name=f"Vault {short_address(vault_addr)}" if vault_addr.startswith("0x") else "Hyperliquid vault",
+                    amount=equity,
+                    price=Decimal("1"),
+                    value=equity,
+                    native=False,
+                    spam=False,
+                    token_type="vault",
+                )
+            )
+        return holdings, None
+
+
+def keep_hyperliquid_holding(holding: Holding, min_value: Decimal) -> bool:
+    if holding.token_type == "perp":
+        return holding.amount > 0
+    return holding.value >= min_value or (holding.amount > 0 and holding.value == 0)
+
+
 async def build_blockscout_portfolio(addresses: list[str], args: argparse.Namespace) -> Portfolio:
     chains = explorer_chains(args)
     portfolio = Portfolio(addresses=list(addresses))
     min_value = Decimal(str(args.min_value))
     limits = httpx.Limits(max_connections=12, max_keepalive_connections=12)
     async with httpx.AsyncClient(timeout=60.0, limits=limits, follow_redirects=True) as client:
+        hl = HyperliquidIndex(client)
         total = len(addresses)
         for index, address in enumerate(addresses, start=1):
             print(f"[{index}/{total}] Scanning {address} via Blockscout ...", file=sys.stderr)
             portfolio.scanned_chains[address] = [chain.slug for chain in chains]
             print(f"  {len(chains)} chain(s)", file=sys.stderr)
 
-            async def one(chain: ExplorerChain) -> tuple[list[Holding], ChainFailure | None]:
+            async def one(chain: ExplorerChain, addr: str = address) -> tuple[list[Holding], ChainFailure | None]:
                 if chain.slug in RPC_SLUGS:
-                    return await fetch_rpc_native(client, address, chain)
-                holdings, failure = await fetch_blockscout_chain(client, address, chain, args)
+                    return await fetch_rpc_native(client, addr, chain)
+                holdings, failure = await fetch_blockscout_chain(client, addr, chain, args)
                 if failure is not None and chain.slug in RPC_FALLBACKS:
                     rpc_holdings, rpc_failure = await fetch_rpc_native(
-                        client, address, RPC_FALLBACKS[chain.slug]
+                        client, addr, RPC_FALLBACKS[chain.slug]
                     )
                     if rpc_holdings:
                         print(
@@ -1160,7 +1380,7 @@ async def build_blockscout_portfolio(addresses: list[str], args: argparse.Namesp
                 if failure is not None:
                     portfolio.failures.append(failure)
             await fill_missing_prices(client, found)
-            portfolio.holdings.extend(
+            kept = [
                 holding
                 for holding in found
                 if keep_holding(
@@ -1170,7 +1390,22 @@ async def build_blockscout_portfolio(addresses: list[str], args: argparse.Namesp
                     include_nfts=args.include_nfts,
                     min_value=min_value,
                 )
-            )
+            ]
+            if want_hyperliquid(args):
+                print("  Hyperliquid DEX ...", file=sys.stderr)
+                hl_holdings, hl_fail = await hl.fetch_address(address)
+                if hl_fail is not None:
+                    portfolio.failures.append(hl_fail)
+                kept.extend(
+                    holding
+                    for holding in hl_holdings
+                    if keep_hyperliquid_holding(holding, min_value)
+                )
+                scanned = list(portfolio.scanned_chains.get(address) or [])
+                if "hyperliquid" not in scanned:
+                    scanned.append("hyperliquid")
+                portfolio.scanned_chains[address] = scanned
+            portfolio.holdings.extend(kept)
     portfolio.holdings.sort(key=lambda h: h.value, reverse=True)
     return portfolio
 
@@ -1381,6 +1616,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--include-spam", action="store_true", help="Keep suspected spam tokens")
     parser.add_argument("--include-dust", action="store_true", help="Keep dust-classified tokens")
     parser.add_argument("--include-nfts", action="store_true", help="Include NFT balances")
+    parser.add_argument(
+        "--no-hyperliquid",
+        action="store_true",
+        help="Skip Hyperliquid DEX spot, perps, and vaults",
+    )
     parser.add_argument("--min-value", type=float, default=0.01, help="Hide holdings worth less than this")
     parser.add_argument(
         "--top",
