@@ -8,7 +8,7 @@ Examples:
   python calculate_assets.py
   python calculate_assets.py --file addresses.txt
   python calculate_assets.py 0xabc... 0xdef...
-  python calculate_assets.py 0xabc...,0xdef... --json --out report.json
+  python calculate_assets.py 0xabc...,0xdef... --out report.json
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ import sys
 import time
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterable
@@ -32,10 +33,10 @@ from dotenv import load_dotenv
 # Wallets to value. CLI arguments and addresses.txt are merged with this list.
 ADDRESSES: list[str] = [
     # "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-    # "0x...",
 ]
 
 DEFAULT_ADDRESS_FILE = "addresses.txt"
+DEFAULT_JSON_OUT = "portfolio.json"
 
 GOLDRUSH_BASE = "https://api.covalenthq.com/v1"
 LLAMA_PRICES = "https://coins.llama.fi/prices/current"
@@ -47,7 +48,7 @@ EVM_MAINNETS: tuple[str, ...] = (
     "eth-mainnet",
     "matic-mainnet",
     "bsc-mainnet",
-    "gnosis-mainnet",
+    # "gnosis-mainnet",
     "optimism-mainnet",
     "base-mainnet",
     "arbitrum-mainnet",
@@ -57,32 +58,32 @@ EVM_MAINNETS: tuple[str, ...] = (
     "scroll-mainnet",
     "zksync-mainnet",
     "blast-mainnet",
-    "mantle-mainnet",
-    "taiko-mainnet",
-    "unichain-mainnet",
-    "world-mainnet",
-    "sonic-mainnet",
-    "sei-mainnet",
-    "berachain-mainnet",
+    # "mantle-mainnet",
+    # "taiko-mainnet",
+    # "unichain-mainnet",
+    # "world-mainnet",
+    # "sonic-mainnet",
+    # "sei-mainnet",
+    # "berachain-mainnet",
     "hyperevm-mainnet",
-    "ink-mainnet",
-    "apechain-mainnet",
-    "plasma-mainnet",
-    "celo-mainnet",
+    # "ink-mainnet",
+    # "apechain-mainnet",
+    # "plasma-mainnet",
+    # "celo-mainnet",
     "fantom-mainnet",
-    "moonbeam-mainnet",
-    "moonbeam-moonriver",
+    # "moonbeam-mainnet",
+    # "moonbeam-moonriver",
     "cronos-mainnet",
     "cronos-zkevm-mainnet",
     "bnb-opbnb-mainnet",
-    "zetachain-mainnet",
-    "redstone-mainnet",
-    "canto-mainnet",
-    "viction-mainnet",
-    "adi-mainnet",
-    "axie-mainnet",
-    "oasis-sapphire-mainnet",
-    "emerald-paratime-mainnet",
+    # "zetachain-mainnet",
+    # "redstone-mainnet",
+    # "canto-mainnet",
+    # "viction-mainnet",
+    # "adi-mainnet",
+    # "axie-mainnet",
+    # "oasis-sapphire-mainnet",
+    # "emerald-paratime-mainnet",
     "megaeth-mainnet",
     "monad-mainnet",
 )
@@ -1274,10 +1275,53 @@ def render_text(portfolio: Portfolio, currency: str, top: int) -> None:
     print()
 
 
+def chain_asset_json(asset: ChainAsset) -> dict[str, Any]:
+    return {
+        "name": asset.name,
+        "symbol": asset.symbol,
+        "quantity": format(asset.quantity, "f"),
+        "price": None if asset.price is None else format(asset.price, "f"),
+        "value": format(asset.value, "f"),
+        "contract": asset.contract,
+        "native": asset.native,
+        "wallets": sorted(asset.wallets),
+    }
+
+
+def holding_asset_json(holding: Holding) -> dict[str, Any]:
+    return {
+        "name": holding.name or holding.symbol,
+        "symbol": holding.symbol,
+        "quantity": format(holding.amount, "f"),
+        "price": None if holding.price is None else format(holding.price, "f"),
+        "value": format(holding.value, "f"),
+        "contract": holding.contract,
+        "native": holding.native,
+        "chain": holding.chain_display,
+        "chain_id": holding.chain_id,
+        "token_type": holding.token_type,
+    }
+
+
+def chain_groups_json(holdings: list[Holding]) -> list[dict[str, Any]]:
+    return [
+        {
+            "chain": chain_name,
+            "value": format(chain_total, "f"),
+            "asset_count": len(assets),
+            "assets": [chain_asset_json(asset) for asset in assets],
+        }
+        for chain_name, chain_total, assets in aggregate_assets_by_chain(holdings)
+    ]
+
+
 def portfolio_json(portfolio: Portfolio, currency: str) -> dict[str, Any]:
     value_by_addr = dict(grouped_totals(portfolio.holdings, lambda h: h.address))
-    chain_groups = aggregate_assets_by_chain(portfolio.holdings)
+    holdings_by_addr: dict[str, list[Holding]] = defaultdict(list)
+    for holding in portfolio.holdings:
+        holdings_by_addr[holding.address].append(holding)
     return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "currency": currency,
         "total_value": format(portfolio.total, "f"),
         "address_count": len(portfolio.addresses),
@@ -1286,33 +1330,23 @@ def portfolio_json(portfolio: Portfolio, currency: str) -> dict[str, Any]:
             {
                 "address": addr,
                 "value": format(value_by_addr.get(addr, Decimal("0")), "f"),
+                "holding_count": len(holdings_by_addr.get(addr, [])),
+                "by_chain": chain_groups_json(holdings_by_addr.get(addr, [])),
+                "holdings": [
+                    holding_asset_json(holding)
+                    for holding in sorted(
+                        holdings_by_addr.get(addr, []),
+                        key=lambda item: item.value,
+                        reverse=True,
+                    )
+                ],
             }
             for addr in portfolio.addresses
         ],
-        "by_chain": [
-            {
-                "chain": chain_name,
-                "value": format(chain_total, "f"),
-                "asset_count": len(assets),
-                "assets": [
-                    {
-                        "name": asset.name,
-                        "symbol": asset.symbol,
-                        "quantity": format(asset.quantity, "f"),
-                        "price": None if asset.price is None else format(asset.price, "f"),
-                        "value": format(asset.value, "f"),
-                        "contract": asset.contract,
-                        "native": asset.native,
-                        "wallets": sorted(asset.wallets),
-                    }
-                    for asset in assets
-                ],
-            }
-            for chain_name, chain_total, assets in chain_groups
-        ],
-        "holdings": [h.to_json() for h in portfolio.holdings],
+        "by_chain": chain_groups_json(portfolio.holdings),
+        "holdings": [holding.to_json() for holding in portfolio.holdings],
         "scanned_chains": portfolio.scanned_chains,
-        "failures": [asdict(f) for f in portfolio.failures],
+        "failures": [asdict(failure) for failure in portfolio.failures],
     }
 
 
@@ -1354,8 +1388,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=50,
         help="Max assets to print per chain (0 = all)",
     )
-    parser.add_argument("--json", action="store_true", help="Print JSON instead of a table")
-    parser.add_argument("--out", help="Write JSON report to this path")
+    parser.add_argument("--json", action="store_true", help="Print JSON to stdout instead of a table")
+    parser.add_argument(
+        "--out",
+        default=DEFAULT_JSON_OUT,
+        help="Write the full JSON report to this path",
+    )
     args = parser.parse_args(argv)
     args.currency = args.currency.upper()
     args.chains = [c.strip() for c in args.chains.split(",") if c.strip()] if args.chains else None
@@ -1396,9 +1434,9 @@ def main(argv: list[str] | None = None) -> int:
 
     portfolio = asyncio.run(build_portfolio(addresses, args))
     report = portfolio_json(portfolio, args.currency)
-    if args.out:
-        Path(args.out).write_text(json.dumps(report, indent=2), encoding="utf-8")
-        print(f"Wrote {args.out}", file=sys.stderr)
+    out_path = Path(args.out)
+    out_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(f"Wrote {out_path.resolve()}", file=sys.stderr)
     if args.json:
         print(json.dumps(report, indent=2))
     else:
