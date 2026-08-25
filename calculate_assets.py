@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Calculate the USD value of assets for EVM addresses across chains.
 
-Default source: public Blockscout explorers (no API key).
-Optional: GoldRush if you still have credits.
+Put wallets in ADDRESSES below, or in addresses.txt (one per line).
+You can also pass them on the command line.
 
 Examples:
-  python calculate_assets.py 0xd8dA6B...........415D37aA96045
-  python calculate_assets.py 0xabc... 0xdef... --json
-  python calculate_assets.py --file wallets.txt --min-value 1 --out report.json
-  python calculate_assets.py 0xabc... --provider goldrush
+  python calculate_assets.py
+  python calculate_assets.py --file addresses.txt
+  python calculate_assets.py 0xabc... 0xdef...
+  python calculate_assets.py 0xabc...,0xdef... --json --out report.json
 """
 
 from __future__ import annotations
@@ -28,6 +28,14 @@ from typing import Any, Iterable
 
 import httpx
 from dotenv import load_dotenv
+
+# Wallets to value. CLI arguments and addresses.txt are merged with this list.
+ADDRESSES: list[str] = [
+    # "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+    # "0x...",
+]
+
+DEFAULT_ADDRESS_FILE = "addresses.txt"
 
 GOLDRUSH_BASE = "https://api.covalenthq.com/v1"
 LLAMA_PRICES = "https://coins.llama.fi/prices/current"
@@ -275,6 +283,7 @@ class ChainFailure:
 
 @dataclass
 class Portfolio:
+    addresses: list[str] = field(default_factory=list)
     holdings: list[Holding] = field(default_factory=list)
     failures: list[ChainFailure] = field(default_factory=list)
     scanned_chains: dict[str, list[str]] = field(default_factory=dict)
@@ -318,17 +327,51 @@ def parse_address(raw: str) -> str:
     raise ValueError(f"invalid EVM address or ENS name: {raw!r}")
 
 
+def extract_addresses(raw: str) -> list[str]:
+    """Pull addresses out of a line that may contain commas, labels, or comments."""
+    text = raw.split("#", 1)[0].strip()
+    if not text:
+        return []
+    tokens = [part.strip() for part in re.split(r"[\s,;]+", text) if part.strip()]
+    found = [token for token in tokens if ADDRESS_RE.fullmatch(token) or DOMAIN_RE.fullmatch(token)]
+    if found:
+        return found
+    if tokens:
+        raise ValueError(f"invalid EVM address or ENS name: {raw!r}")
+    return []
+
+
+def load_address_file(file_path: str) -> list[str]:
+    path = Path(file_path)
+    text = path.read_text(encoding="utf-8")
+    if path.suffix.lower() == ".json":
+        payload = json.loads(text)
+        if isinstance(payload, dict):
+            payload = payload.get("addresses") or payload.get("wallets") or []
+        rows: list[str] = []
+        for item in payload:
+            if isinstance(item, str):
+                rows.append(item)
+            elif isinstance(item, dict):
+                rows.append(str(item.get("address") or item.get("wallet") or ""))
+        return rows
+    return text.splitlines()
+
+
 def read_addresses(values: Iterable[str], file_path: str | None) -> list[str]:
     collected: list[str] = []
-    sources = list(values)
-    if file_path:
-        text = Path(file_path).read_text(encoding="utf-8")
-        sources.extend(line.strip() for line in text.splitlines())
+    sources: list[str] = list(ADDRESSES)
+    sources.extend(values)
+    chosen_file = file_path
+    if not chosen_file and Path(DEFAULT_ADDRESS_FILE).exists():
+        chosen_file = DEFAULT_ADDRESS_FILE
+    if chosen_file:
+        sources.extend(load_address_file(chosen_file))
     for item in sources:
-        item = item.strip()
+        item = str(item).strip()
         if not item or item.startswith("#"):
             continue
-        collected.append(parse_address(item))
+        collected.extend(extract_addresses(item))
     seen: set[str] = set()
     unique: list[str] = []
     for addr in collected:
@@ -337,7 +380,12 @@ def read_addresses(values: Iterable[str], file_path: str | None) -> list[str]:
             seen.add(key)
             unique.append(addr)
     if not unique:
-        raise SystemExit("Provide at least one EVM address (or ENS name).")
+        raise SystemExit(
+            "Provide at least one EVM address.\n"
+            f"  • Edit ADDRESSES in calculate_assets.py\n"
+            f"  • Or put wallets in {DEFAULT_ADDRESS_FILE} (one per line)\n"
+            "  • Or pass them: python calculate_assets.py 0xabc... 0xdef..."
+        )
     return unique
 
 
@@ -618,10 +666,11 @@ async def build_goldrush_portfolio(addresses: list[str], args: argparse.Namespac
             "(no key required), or set a key from https://goldrush.dev/platform"
         )
     client = GoldRushClient(key)
-    portfolio = Portfolio()
+    portfolio = Portfolio(addresses=list(addresses))
     try:
-        for address in addresses:
-            print(f"Scanning {address} via GoldRush ...", file=sys.stderr)
+        total = len(addresses)
+        for index, address in enumerate(addresses, start=1):
+            print(f"[{index}/{total}] Scanning {address} via GoldRush ...", file=sys.stderr)
             chains = await resolve_goldrush_chains(
                 client,
                 address,
@@ -993,12 +1042,13 @@ async def fill_missing_prices(client: httpx.AsyncClient, holdings: list[Holding]
 
 async def build_blockscout_portfolio(addresses: list[str], args: argparse.Namespace) -> Portfolio:
     chains = explorer_chains(args)
-    portfolio = Portfolio()
+    portfolio = Portfolio(addresses=list(addresses))
     min_value = Decimal(str(args.min_value))
     limits = httpx.Limits(max_connections=12, max_keepalive_connections=12)
     async with httpx.AsyncClient(timeout=60.0, limits=limits, follow_redirects=True) as client:
-        for address in addresses:
-            print(f"Scanning {address} via Blockscout ...", file=sys.stderr)
+        total = len(addresses)
+        for index, address in enumerate(addresses, start=1):
+            print(f"[{index}/{total}] Scanning {address} via Blockscout ...", file=sys.stderr)
             portfolio.scanned_chains[address] = [chain.slug for chain in chains]
             print(f"  {len(chains)} chain(s)", file=sys.stderr)
 
@@ -1072,14 +1122,15 @@ def render_text(portfolio: Portfolio, currency: str, top: int) -> None:
     print(" EVM PORTFOLIO VALUE".ljust(78))
     print("=" * 78)
     print(f" Total value : {money(portfolio.total, currency)} {currency}")
-    print(f" Addresses   : {len(portfolio.scanned_chains)}")
+    print(f" Addresses   : {len(portfolio.addresses)}")
     print(f" Holdings    : {len(portfolio.holdings)}")
     print()
 
     print("BY ADDRESS")
+    value_by_addr = dict(grouped_totals(portfolio.holdings, lambda h: h.address))
     addr_rows = [
-        [short_address(addr), money(total, currency)]
-        for addr, total in grouped_totals(portfolio.holdings, lambda h: h.address)
+        [addr, money(value_by_addr.get(addr, Decimal("0")), currency)]
+        for addr in portfolio.addresses
     ]
     if not addr_rows:
         print("  (no valued holdings)")
@@ -1134,12 +1185,18 @@ def render_text(portfolio: Portfolio, currency: str, top: int) -> None:
 
 
 def portfolio_json(portfolio: Portfolio, currency: str) -> dict[str, Any]:
+    value_by_addr = dict(grouped_totals(portfolio.holdings, lambda h: h.address))
     return {
         "currency": currency,
         "total_value": format(portfolio.total, "f"),
+        "address_count": len(portfolio.addresses),
+        "addresses": portfolio.addresses,
         "by_address": [
-            {"address": addr, "value": format(total, "f")}
-            for addr, total in grouped_totals(portfolio.holdings, lambda h: h.address)
+            {
+                "address": addr,
+                "value": format(value_by_addr.get(addr, Decimal("0")), "f"),
+            }
+            for addr in portfolio.addresses
         ],
         "by_chain": [
             {"chain": name, "value": format(total, "f")}
@@ -1156,8 +1213,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Calculate native + ERC-20 asset value for EVM addresses across chains.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("addresses", nargs="*", help="EVM addresses or ENS names")
-    parser.add_argument("--file", "-f", help="Text file with one address per line")
+    parser.add_argument(
+        "addresses",
+        nargs="*",
+        help="EVM addresses or ENS names. Also reads ADDRESSES in this file and addresses.txt",
+    )
+    parser.add_argument(
+        "--file",
+        "-f",
+        help=f"Text/JSON file of wallets (default: {DEFAULT_ADDRESS_FILE} if present)",
+    )
     parser.add_argument(
         "--provider",
         choices=("blockscout", "goldrush", "auto"),
