@@ -293,6 +293,73 @@ class Portfolio:
         return sum((h.value for h in self.holdings), Decimal("0"))
 
 
+@dataclass
+class ChainAsset:
+    chain: str
+    name: str
+    symbol: str
+    contract: str
+    quantity: Decimal
+    value: Decimal
+    native: bool
+    wallets: set = field(default_factory=set)
+
+    @property
+    def price(self) -> Decimal | None:
+        if self.quantity <= 0 or self.value <= 0:
+            return None
+        return self.value / self.quantity
+
+
+def grouped_totals(holdings: list[Holding], key) -> list[tuple[str, Decimal]]:
+    buckets: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+    for holding in holdings:
+        buckets[key(holding)] += holding.value
+    return sorted(buckets.items(), key=lambda kv: kv[1], reverse=True)
+
+
+def aggregate_assets_by_chain(holdings: list[Holding]) -> list[tuple[str, Decimal, list[ChainAsset]]]:
+    buckets: dict[tuple[str, str], ChainAsset] = {}
+    for holding in holdings:
+        contract = (holding.contract or holding.symbol or "").lower()
+        key = (holding.chain_display, contract)
+        row = buckets.get(key)
+        if row is None:
+            row = ChainAsset(
+                chain=holding.chain_display,
+                name=holding.name or holding.symbol,
+                symbol=holding.symbol,
+                contract=holding.contract,
+                quantity=Decimal("0"),
+                value=Decimal("0"),
+                native=holding.native,
+            )
+            buckets[key] = row
+        row.quantity += holding.amount
+        row.value += holding.value
+        row.wallets.add(holding.address)
+        if holding.name and (not row.name or len(holding.name) > len(row.name)):
+            row.name = holding.name
+        if holding.symbol and row.symbol in {"", "?"}:
+            row.symbol = holding.symbol
+
+    by_chain: dict[str, list[ChainAsset]] = defaultdict(list)
+    for row in buckets.values():
+        by_chain[row.chain].append(row)
+    for assets in by_chain.values():
+        assets.sort(key=lambda item: (item.value, item.quantity), reverse=True)
+
+    ordered = sorted(
+        by_chain.items(),
+        key=lambda kv: sum((item.value for item in kv[1]), Decimal("0")),
+        reverse=True,
+    )
+    return [
+        (chain, sum((item.value for item in assets), Decimal("0")), assets)
+        for chain, assets in ordered
+    ]
+
+
 class RateLimiter:
     def __init__(self, requests_per_second: float = 3.5) -> None:
         self._interval = 1.0 / requests_per_second
@@ -423,6 +490,22 @@ def money(value: Decimal, currency: str) -> str:
     symbol = CURRENCY_SYMBOLS.get(currency.upper(), f"{currency} ")
     sign = "-" if value < 0 else ""
     return f"{sign}{symbol}{abs(value):,.2f}"
+
+
+def format_quantity(amount: Decimal) -> str:
+    if amount == 0:
+        return "0"
+    sign = "-" if amount < 0 else ""
+    amount = amount.copy_abs()
+    if amount >= Decimal("1000000"):
+        text = f"{amount:,.2f}"
+    elif amount >= Decimal("1"):
+        text = f"{amount:,.6f}".rstrip("0").rstrip(".")
+    else:
+        text = f"{amount:.10f}".rstrip("0").rstrip(".")
+        if not text or text == ".":
+            text = format(amount.normalize(), "f")
+    return sign + text
 
 
 def short_address(address: str) -> str:
@@ -1091,13 +1174,6 @@ async def build_blockscout_portfolio(addresses: list[str], args: argparse.Namesp
     return portfolio
 
 
-def grouped_totals(holdings: list[Holding], key) -> list[tuple[str, Decimal]]:
-    buckets: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
-    for holding in holdings:
-        buckets[key(holding)] += holding.value
-    return sorted(buckets.items(), key=lambda kv: kv[1], reverse=True)
-
-
 def print_table(headers: list[str], rows: list[list[str]], alignments: list[str]) -> None:
     widths = [len(h) for h in headers]
     for row in rows:
@@ -1118,9 +1194,9 @@ def print_table(headers: list[str], rows: list[list[str]], alignments: list[str]
 
 def render_text(portfolio: Portfolio, currency: str, top: int) -> None:
     print()
-    print("=" * 78)
-    print(" EVM PORTFOLIO VALUE".ljust(78))
-    print("=" * 78)
+    print("=" * 88)
+    print(" EVM PORTFOLIO VALUE")
+    print("=" * 88)
     print(f" Total value : {money(portfolio.total, currency)} {currency}")
     print(f" Addresses   : {len(portfolio.addresses)}")
     print(f" Holdings    : {len(portfolio.holdings)}")
@@ -1138,43 +1214,57 @@ def render_text(portfolio: Portfolio, currency: str, top: int) -> None:
         print_table(["Address", "Value"], addr_rows, ["l", "r"])
     print()
 
-    print("BY CHAIN")
-    chain_rows = [
-        [name, money(total, currency)]
-        for name, total in grouped_totals(portfolio.holdings, lambda h: h.chain_display)
-        if total > 0
-    ]
-    if not chain_rows:
-        print("  (no valued holdings)")
+    chain_groups = aggregate_assets_by_chain(portfolio.holdings)
+    if not chain_groups:
+        print("ASSETS BY CHAIN")
+        print("  (no holdings)")
+        print()
     else:
-        print_table(["Chain", "Value"], chain_rows, ["l", "r"])
-    print()
-
-    print(f"HOLDINGS (top {top})")
-    shown = [h for h in portfolio.holdings if h.value > 0][:top]
-    hold_rows = [
-        [
-            h.symbol[:16],
-            h.chain_display[:18],
-            short_address(h.address),
-            f"{h.amount.normalize():f}"[:18],
-            money(h.value, currency),
-        ]
-        for h in shown
-    ]
-    if not hold_rows:
-        print("  (no valued holdings)")
-    else:
-        print_table(["Token", "Chain", "Wallet", "Amount", "Value"], hold_rows, ["l", "l", "l", "r", "r"])
+        print("ASSETS BY CHAIN")
+        print("-" * 88)
+        for chain_name, chain_total, assets in chain_groups:
+            print()
+            print(
+                f"{chain_name}  {money(chain_total, currency)}  "
+                f"({len(assets)} asset{'' if len(assets) == 1 else 's'})"
+            )
+            shown = assets if top <= 0 else assets[:top]
+            rows = [
+                [
+                    (asset.name or asset.symbol)[:32],
+                    asset.symbol[:12],
+                    format_quantity(asset.quantity),
+                    money(asset.price, currency) if asset.price is not None else "—",
+                    money(asset.value, currency),
+                ]
+                for asset in shown
+            ]
+            print_table(
+                ["Name", "Symbol", "Quantity", "Price", "Value"],
+                rows,
+                ["l", "l", "r", "r", "r"],
+            )
+            hidden = len(assets) - len(shown)
+            if hidden > 0:
+                print(f"  ... and {hidden} more on {chain_name} (raise --top to see them)")
 
     unpriced = [h for h in portfolio.holdings if h.value == 0]
     if unpriced:
         print()
-        print(f"Unpriced tokens (no spot quote): {len(unpriced)}")
-        for holding in unpriced[:15]:
-            print(f"  {holding.symbol:12} {holding.chain_display:18} {holding.amount.normalize():f}")
-        if len(unpriced) > 15:
-            print(f"  ... and {len(unpriced) - 15} more")
+        print(f"UNPRICED ASSETS (quantity only, no spot quote): {len(unpriced)}")
+        unpriced_rows = [
+            [
+                (h.name or h.symbol)[:32],
+                h.symbol[:12],
+                h.chain_display[:16],
+                format_quantity(h.amount),
+            ]
+            for h in unpriced[: max(top, 15)]
+        ]
+        print_table(["Name", "Symbol", "Chain", "Quantity"], unpriced_rows, ["l", "l", "l", "r"])
+        extra = len(unpriced) - len(unpriced_rows)
+        if extra > 0:
+            print(f"  ... and {extra} more unpriced tokens")
 
     if portfolio.failures:
         print()
@@ -1186,6 +1276,7 @@ def render_text(portfolio: Portfolio, currency: str, top: int) -> None:
 
 def portfolio_json(portfolio: Portfolio, currency: str) -> dict[str, Any]:
     value_by_addr = dict(grouped_totals(portfolio.holdings, lambda h: h.address))
+    chain_groups = aggregate_assets_by_chain(portfolio.holdings)
     return {
         "currency": currency,
         "total_value": format(portfolio.total, "f"),
@@ -1199,8 +1290,25 @@ def portfolio_json(portfolio: Portfolio, currency: str) -> dict[str, Any]:
             for addr in portfolio.addresses
         ],
         "by_chain": [
-            {"chain": name, "value": format(total, "f")}
-            for name, total in grouped_totals(portfolio.holdings, lambda h: h.chain_display)
+            {
+                "chain": chain_name,
+                "value": format(chain_total, "f"),
+                "asset_count": len(assets),
+                "assets": [
+                    {
+                        "name": asset.name,
+                        "symbol": asset.symbol,
+                        "quantity": format(asset.quantity, "f"),
+                        "price": None if asset.price is None else format(asset.price, "f"),
+                        "value": format(asset.value, "f"),
+                        "contract": asset.contract,
+                        "native": asset.native,
+                        "wallets": sorted(asset.wallets),
+                    }
+                    for asset in assets
+                ],
+            }
+            for chain_name, chain_total, assets in chain_groups
         ],
         "holdings": [h.to_json() for h in portfolio.holdings],
         "scanned_chains": portfolio.scanned_chains,
@@ -1240,7 +1348,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--include-dust", action="store_true", help="Keep dust-classified tokens")
     parser.add_argument("--include-nfts", action="store_true", help="Include NFT balances")
     parser.add_argument("--min-value", type=float, default=0.01, help="Hide holdings worth less than this")
-    parser.add_argument("--top", type=int, default=25, help="How many holdings to print")
+    parser.add_argument(
+        "--top",
+        type=int,
+        default=50,
+        help="Max assets to print per chain (0 = all)",
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON instead of a table")
     parser.add_argument("--out", help="Write JSON report to this path")
     args = parser.parse_args(argv)
