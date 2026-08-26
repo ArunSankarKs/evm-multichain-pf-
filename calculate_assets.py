@@ -196,7 +196,7 @@ BLOCKSCOUT_CHAINS: tuple[ExplorerChain, ...] = (
     ExplorerChain("base", "Base", 8453, "https://base.blockscout.com", "ETH", "base"),
     ExplorerChain("optimism", "Optimism", 10, "https://optimism.blockscout.com", "ETH", "optimism"),
     ExplorerChain("arbitrum", "Arbitrum One", 42161, "https://arbitrum.blockscout.com", "ETH", "arbitrum"),
-    ExplorerChain("polygon", "Polygon", 137, "https://polygon.blockscout.com", "POL", "polygon"),
+    # ExplorerChain("polygon", "Polygon", 137, "https://polygon.blockscout.com", "POL", "polygon"),
     # ExplorerChain("gnosis", "Gnosis", 100, "https://gnosis.blockscout.com", "xDAI", "xdai"),
     # ExplorerChain("scroll", "Scroll", 534352, "https://scroll.blockscout.com", "ETH", "scroll"),
     # ExplorerChain("zksync", "zkSync Era", 324, "https://zksync.blockscout.com", "ETH", "era"),
@@ -209,10 +209,56 @@ BLOCKSCOUT_CHAINS: tuple[ExplorerChain, ...] = (
 FAST_EXPLORER_SLUGS = {"ethereum", "polygon", "base", "optimism", "arbitrum", "gnosis"}
 
 RPC_CHAINS: tuple[ExplorerChain, ...] = (
-    ExplorerChain("bsc", "BNB Smart Chain", 56, "https://bsc-dataseed.binance.org", "BNB", "bsc"),
+    ExplorerChain("bsc", "BNB Smart Chain", 56, "https://bsc-rpc.publicnode.com", "BNB", "bsc"),
     ExplorerChain("avalanche", "Avalanche C-Chain", 43114, "https://api.avax.network/ext/bc/C/rpc", "AVAX", "avax"),
-    ExplorerChain("polygon_zkevm", "Polygon zkEVM", 1101, "https://zkevm-rpc.com", "ETH", "polygon_zkevm"),
+    # ExplorerChain("polygon_zkevm", "Polygon zkEVM", 1101, "https://zkevm-rpc.com", "ETH", "polygon_zkevm"),
 )
+
+# Well-known ERC-20/BEP-20s queried via RPC on chains without a free token indexer.
+RPC_TOKEN_LISTS: dict[str, tuple[tuple[str, str, str, int], ...]] = {
+    "bsc": (
+        ("0x1af3f329e8be154074d8769d1ffa4ee427b01dca", "DAI", "Binance-Peg Dai Token", 18),
+        ("0x55d398326f99059ff775485246999027b3197955", "USDT", "Binance-Peg BSC-USD", 18),
+        ("0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d", "USDC", "Binance-Peg USD Coin", 18),
+        ("0xe9e7cea3dedca5984780bafc599bd69add087d56", "BUSD", "BUSD Token", 18),
+        ("0x2170ed0880ac9a755fd29b2688956bd959f933f8", "ETH", "Binance-Peg Ethereum Token", 18),
+        ("0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c", "BTCB", "Binance-Peg BTCB Token", 18),
+        ("0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c", "WBNB", "Wrapped BNB", 18),
+        ("0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82", "CAKE", "PancakeSwap Token", 18),
+        ("0x1d2f0da169ceb9fc7b3144628db156f3f6c60dbe", "XRP", "Binance-Peg XRP Token", 18),
+        ("0x3ee2200efb3400fabb9aacf31297cbdd1d435d47", "ADA", "Binance-Peg Cardano Token", 18),
+        ("0x7083609fce4d1d8dc0c979aab8c869ea2c873402", "DOT", "Binance-Peg Polkadot Token", 18),
+        ("0xf8a0bf9cf54bb92f17374d9e9a321e6a111a51bd", "LINK", "Binance-Peg ChainLink Token", 18),
+        ("0xbf5140a22578168fd562dccf235e5d43a02ce9b1", "UNI", "Binance-Peg Uniswap", 18),
+        ("0xba2ae424d960c26247dd6c32edc70b295c744c43", "DOGE", "Binance-Peg Dogecoin Token", 8),
+        ("0x4338665cbb7b2485a8855a139b75d5e34ab0db94", "LTC", "Binance-Peg Litecoin Token", 18),
+        ("0x8ff795a6f4d97e7887c79bea79aba5cc76444adf", "BCH", "Binance-Peg Bitcoin Cash Token", 18),
+        ("0x0d8ce2a99bb6e3b7db580ed848240e4a0f9ae153", "FIL", "Binance-Peg Filecoin Token", 18),
+        ("0xce7de646e7201a81c8c0317612deed4f572779fb", "TRX", "Tron", 6),
+        ("0xfb6115445bff7b52feb98650c87f44907e58f802", "AAVE", "Binance-Peg Aave Token", 18),
+        ("0xcc42724c6683b7e57334c4e856f4c9965ed682bd", "MATIC", "Binance-Peg MATIC Token", 18),
+        ("0x2859e4544c4bb03966803b044a93563bd2d0dd4d", "SHIB", "Binance-Peg SHIBA INU Token", 18),
+        ("0x42981d0beBCb64CaE7FCb2d3cE2cB3E22Da63421", "TWT", "Trust Wallet", 18),
+    ),
+    "avalanche": (
+        ("0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7", "WAVAX", "Wrapped AVAX", 18),
+        ("0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e", "USDC", "USD Coin", 6),
+        ("0xa7d7079b0fead59f3e5e3a81847bd598e7650c5c", "USDC.E", "USD Coin (Bridged)", 6),
+        ("0x9702230a8ea53601f5cd2dc00fdbc13d4df4a8c7", "USDT", "TetherToken", 6),
+        ("0xd586e7f844cea2f87f50152665bcbc2c279d8d70", "DAI.E", "Dai Stablecoin", 18),
+        ("0x49d5c2bdffac6ce2bfdb6640f4f80f226bc10bab", "WETH.E", "Wrapped Ether", 18),
+        ("0x152b9d0fdc40c096757f570a51e494bd4b943e50", "BTC.B", "Bitcoin", 8),
+    ),
+}
+
+RPC_TOKENLIST_URLS: dict[str, tuple[str, int]] = {
+    "bsc": ("https://tokens.pancakeswap.finance/pancakeswap-top-100.json", 56),
+    "avalanche": (
+        "https://raw.githubusercontent.com/traderjoe-xyz/joe-tokenlists/main/mc.tokenlist.json",
+        43114,
+    ),
+}
+_RPC_TOKEN_CACHE: dict[str, list[dict[str, Any]]] = {}
 
 # Native RPC fallbacks when a Blockscout v2 explorer returns 5xx.
 RPC_FALLBACKS = {
@@ -1157,7 +1203,157 @@ async def fetch_blockscout_chain(
             chain=chain.name,
             error=f"token balances HTTP {token_resp.status_code}",
         )
+    paged = await fetch_blockscout_token_pages(client, address, chain, args.include_nfts)
+    seen = {(h.contract or "").lower() for h in holdings if not h.native}
+    for item in paged:
+        holding = explorer_token_holding(address, chain, item, include_nfts=args.include_nfts)
+        if holding is None or holding.contract in seen:
+            continue
+        seen.add(holding.contract)
+        holdings.append(holding)
     return holdings, None
+
+
+async def load_rpc_tokens(client: httpx.AsyncClient, slug: str) -> list[dict[str, Any]]:
+    cached = _RPC_TOKEN_CACHE.get(slug)
+    if cached is not None:
+        return cached
+    merged: dict[str, dict[str, Any]] = {}
+    spec = RPC_TOKENLIST_URLS.get(slug)
+    if spec:
+        url, chain_id = spec
+        try:
+            response = await client.get(url, timeout=15.0)
+            response.raise_for_status()
+            payload = response.json()
+            for item in payload.get("tokens") or []:
+                if int(item.get("chainId") or 0) != chain_id:
+                    continue
+                contract = str(item.get("address") or "").lower()
+                if not contract.startswith("0x"):
+                    continue
+                merged[contract] = {
+                    "contract": contract,
+                    "symbol": str(item.get("symbol") or "?"),
+                    "name": str(item.get("name") or item.get("symbol") or "?"),
+                    "decimals": int(item.get("decimals") or 18),
+                }
+        except (httpx.HTTPError, ValueError, TypeError, json.JSONDecodeError):
+            pass
+    for contract, symbol, name, decimals in RPC_TOKEN_LISTS.get(slug, ()):
+        contract = contract.lower()
+        merged[contract] = {
+            "contract": contract,
+            "symbol": symbol,
+            "name": name,
+            "decimals": decimals,
+        }
+    tokens = list(merged.values())
+    _RPC_TOKEN_CACHE[slug] = tokens
+    return tokens
+
+
+async def rpc_erc20_balances(
+    client: httpx.AsyncClient,
+    rpc: str,
+    tokens: list[dict[str, Any]],
+    holder: str,
+) -> list[int]:
+    data = BALANCE_OF_SELECTOR + "000000000000000000000000" + holder[2:].lower()
+    headers = {"Content-Type": "application/json", "User-Agent": "calculate-assets/1.0"}
+    balances = [0] * len(tokens)
+    chunk_size = 10
+    for start in range(0, len(tokens), chunk_size):
+        chunk = tokens[start : start + chunk_size]
+        batch = [
+            {
+                "jsonrpc": "2.0",
+                "id": start + index,
+                "method": "eth_call",
+                "params": [{"to": token["contract"], "data": data}, "latest"],
+            }
+            for index, token in enumerate(chunk)
+        ]
+        payload = None
+        try:
+            response = await client.post(rpc, json=batch, headers=headers, timeout=20.0)
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, json.JSONDecodeError):
+            payload = None
+        rows = payload if isinstance(payload, list) else []
+        by_id = {item.get("id"): item for item in rows if isinstance(item, dict)}
+        if len(by_id) < len(chunk):
+            # Some public RPCs rate-limit large batches; fall back per token.
+            for index, token in enumerate(chunk):
+                idx = start + index
+                if idx in by_id and (by_id[idx].get("result") or "0x") != "0x" and not by_id[idx].get("error"):
+                    continue
+                try:
+                    response = await client.post(
+                        rpc,
+                        json={
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "method": "eth_call",
+                            "params": [{"to": token["contract"], "data": data}, "latest"],
+                        },
+                        headers=headers,
+                        timeout=15.0,
+                    )
+                    response.raise_for_status()
+                    result = (response.json() or {}).get("result")
+                except (httpx.HTTPError, json.JSONDecodeError, ValueError, TypeError):
+                    continue
+                if result and result != "0x":
+                    balances[idx] = int(result, 16)
+            continue
+        for index in range(len(chunk)):
+            item = by_id.get(start + index) or {}
+            result = item.get("result")
+            if result and result != "0x" and not item.get("error"):
+                balances[start + index] = int(result, 16)
+    return balances
+
+
+async def fetch_blockscout_token_pages(
+    client: httpx.AsyncClient,
+    address: str,
+    chain: ExplorerChain,
+    include_nfts: bool,
+) -> list[dict[str, Any]]:
+    headers = {"Accept": "application/json", "User-Agent": "calculate-assets/1.0"}
+    token_type = "ERC-20,ERC-721,ERC-1155" if include_nfts else "ERC-20"
+    params: dict[str, Any] = {"type": token_type}
+    items: list[dict[str, Any]] = []
+    for _ in range(8):
+        try:
+            response = await client.get(
+                f"{chain.explorer}/api/v2/addresses/{address}/tokens",
+                headers=headers,
+                params=params,
+                timeout=8.0,
+            )
+        except httpx.HTTPError:
+            break
+        if response.status_code != 200:
+            break
+        try:
+            payload = response.json()
+        except json.JSONDecodeError:
+            break
+        if isinstance(payload, list):
+            items.extend(item for item in payload if isinstance(item, dict))
+            break
+        page = payload.get("items") if isinstance(payload, dict) else None
+        if isinstance(page, list):
+            items.extend(item for item in page if isinstance(item, dict))
+        nxt = payload.get("next_page_params") if isinstance(payload, dict) else None
+        if not isinstance(nxt, dict) or not nxt:
+            break
+        params = dict(nxt)
+        params["type"] = token_type
+    return items
 
 
 async def fetch_rpc_native(
@@ -1167,36 +1363,79 @@ async def fetch_rpc_native(
 ) -> tuple[list[Holding], ChainFailure | None]:
     payload = {"jsonrpc": "2.0", "id": 1, "method": "eth_getBalance", "params": [address, "latest"]}
     headers = {"Content-Type": "application/json", "User-Agent": "calculate-assets/1.0"}
+    holdings: list[Holding] = []
     try:
         response = await client.post(chain.explorer, json=payload, headers=headers)
         response.raise_for_status()
         result = (response.json() or {}).get("result")
     except httpx.HTTPError as exc:
         return [], ChainFailure(address=address, chain=chain.name, error=str(exc))
-    if not result:
-        return [], None
-    amount = human_amount(int(result, 16), 18)
-    if amount <= 0:
-        return [], None
-    holding = Holding(
-        address=address,
-        chain_name=chain.slug,
-        chain_id=chain.chain_id,
-        chain_display=chain.name,
-        contract="native",
-        symbol=chain.native_symbol,
-        name=chain.native_symbol,
-        amount=amount,
-        price=None,
-        value=Decimal("0"),
-        native=True,
-        spam=False,
-        token_type="cryptocurrency",
-    )
-    return [holding], None
+    if result:
+        amount = human_amount(int(result, 16), 18)
+        if amount > 0:
+            holdings.append(
+                Holding(
+                    address=address,
+                    chain_name=chain.slug,
+                    chain_id=chain.chain_id,
+                    chain_display=chain.name,
+                    contract="native",
+                    symbol=chain.native_symbol,
+                    name=chain.native_symbol,
+                    amount=amount,
+                    price=None,
+                    value=Decimal("0"),
+                    native=True,
+                    spam=False,
+                    token_type="cryptocurrency",
+                )
+            )
+    tokens = await load_rpc_tokens(client, chain.slug)
+    if tokens:
+        raw_balances = await rpc_erc20_balances(client, chain.explorer, tokens, address)
+        for token, raw in zip(tokens, raw_balances):
+            amount = human_amount(raw, token["decimals"])
+            if amount <= 0:
+                continue
+            holdings.append(
+                Holding(
+                    address=address,
+                    chain_name=chain.slug,
+                    chain_id=chain.chain_id,
+                    chain_display=chain.name,
+                    contract=token["contract"],
+                    symbol=token["symbol"],
+                    name=token["name"],
+                    amount=amount,
+                    price=None,
+                    value=Decimal("0"),
+                    native=False,
+                    spam=False,
+                    token_type="cryptocurrency",
+                )
+            )
+    return holdings, None
 
 
 STABLE_SYMBOLS = {"USDC", "USDT", "DAI", "USDC.E", "USDT0", "WETH", "WBTC", "ETH", "POL", "WPOL", "BNB", "AVAX"}
+USD_STABLE_SYMBOLS = {
+    "USDC",
+    "USDT",
+    "DAI",
+    "USDC.E",
+    "USDT.E",
+    "DAI.E",
+    "USDT0",
+    "BUSD",
+    "BSC-USD",
+    "USD₮",
+    "USDH",
+    "USDE",
+    "USD0",
+    "TUSD",
+    "FDUSD",
+    "USDD",
+}
 
 
 async def fill_missing_prices(client: httpx.AsyncClient, holdings: list[Holding]) -> None:
@@ -1231,6 +1470,12 @@ async def fill_missing_prices(client: httpx.AsyncClient, holdings: list[Holding]
         holding = holdings[i]
         holding.price = price
         holding.value = holding.amount * price
+    for holding in holdings:
+        if holding.value > 0 or holding.price:
+            continue
+        if holding.symbol.upper() in USD_STABLE_SYMBOLS:
+            holding.price = Decimal("1")
+            holding.value = holding.amount
 
 
 def want_hyperliquid(args: argparse.Namespace) -> bool:
