@@ -39,7 +39,68 @@ DEFAULT_ADDRESS_FILE = "addresses.txt"
 DEFAULT_JSON_OUT = "portfolio.json"
 
 HYPERLIQUID_INFO = "https://api.hyperliquid.xyz/info"
+HYPERUNIT_API = "https://api.hyperunit.xyz"
+HYPEREVM_RPC = "https://rpc.hyperliquid.xyz/evm"
+ETH_RPC = "https://ethereum-rpc.publicnode.com"
 HL_STABLES = {"USDC", "USDH", "USDT", "USD₮", "USD₮0", "USDE", "USD0"}
+# Unit (HIP-1) tickers are not in allMids; price them as the native asset.
+UNIT_UNDERLYING = {
+    "UETH": "ETH",
+    "UBTC": "BTC",
+    "USOL": "SOL",
+    "UPUMP": "PUMP",
+    "UFART": "FARTCOIN",
+    "UUUSPX": "SPX",
+    "UBONK": "BONK",
+    "UZEC": "ZEC",
+    "UAVAX": "AVAX",
+    "UVIRT": "VIRTUAL",
+    "UANSEM": "ANSEM",
+    "XPL": "XPL",
+}
+UNIT_ASSET_TICKER = {
+    "eth": "UETH",
+    "btc": "UBTC",
+    "sol": "USOL",
+    "pump": "UPUMP",
+    "fart": "UFART",
+    "spxs": "UUUSPX",
+    "spx": "UUUSPX",
+    "bonk": "UBONK",
+    "zec": "UZEC",
+    "avax": "UAVAX",
+    "virtual": "UVIRT",
+    "ansem": "UANSEM",
+    "xpl": "XPL",
+    "mon": "UMON",
+}
+UNIT_ASSET_DECIMALS = {
+    "eth": 18,
+    "btc": 8,
+    "sol": 9,
+    "pump": 6,
+    "fart": 6,
+    "spxs": 8,
+    "spx": 8,
+    "bonk": 5,
+    "zec": 8,
+    "avax": 18,
+    "virtual": 18,
+    "ansem": 6,
+    "xpl": 18,
+    "mon": 18,
+    "2z": 9,
+}
+UNIT_PENDING_STATES = {
+    "sourceTxDiscovered",
+    "waitForSrcTxFinalization",
+    "buildingDstTx",
+    "signTx",
+    "broadcastTx",
+    "waitForDstTxFinalization",
+}
+BALANCE_OF_SELECTOR = "0x70a08231"
+DECIMALS_SELECTOR = "0x313ce567"
 LLAMA_PRICES = "https://coins.llama.fi/prices/current"
 ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 DOMAIN_RE = re.compile(r"^[a-zA-Z0-9.-]+\.(eth|lens|crypto|nft|wallet|dao)$", re.I)
@@ -131,20 +192,13 @@ BLOCKSCOUT_CHAINS: tuple[ExplorerChain, ...] = (
     ExplorerChain("optimism", "Optimism", 10, "https://optimism.blockscout.com", "ETH", "optimism"),
     ExplorerChain("arbitrum", "Arbitrum One", 42161, "https://arbitrum.blockscout.com", "ETH", "arbitrum"),
     ExplorerChain("polygon", "Polygon", 137, "https://polygon.blockscout.com", "POL", "polygon"),
-    ExplorerChain("gnosis", "Gnosis", 100, "https://gnosis.blockscout.com", "xDAI", "xdai"),
-    ExplorerChain("scroll", "Scroll", 534352, "https://scroll.blockscout.com", "ETH", "scroll"),
-    ExplorerChain("zksync", "zkSync Era", 324, "https://zksync.blockscout.com", "ETH", "era"),
-    ExplorerChain("celo", "Celo", 42220, "https://explorer.celo.org", "CELO", "celo"),
-    ExplorerChain("unichain", "Unichain", 130, "https://unichain.blockscout.com", "ETH", "unichain"),
-    ExplorerChain("ink", "Ink", 57073, "https://explorer.inkonchain.com", "ETH", "ink"),
-    ExplorerChain(
-        "worldchain",
-        "World Chain",
-        480,
-        "https://worldchain-mainnet.explorer.alchemy.com",
-        "ETH",
-        "wc",
-    ),
+    # ExplorerChain("gnosis", "Gnosis", 100, "https://gnosis.blockscout.com", "xDAI", "xdai"),
+    # ExplorerChain("scroll", "Scroll", 534352, "https://scroll.blockscout.com", "ETH", "scroll"),
+    # ExplorerChain("zksync", "zkSync Era", 324, "https://zksync.blockscout.com", "ETH", "era"),
+    # ExplorerChain("celo", "Celo", 42220, "https://explorer.celo.org", "CELO", "celo"),
+    # ExplorerChain("unichain", "Unichain", 130, "https://unichain.blockscout.com", "ETH", "unichain"),
+    # ExplorerChain("ink", "Ink", 57073, "https://explorer.inkonchain.com", "ETH", "ink"),
+    # ExplorerChain("worldchain","World Chain",480,"https://worldchain-mainnet.explorer.alchemy.com","ETH","wc",),
 )
 
 FAST_EXPLORER_SLUGS = {"ethereum", "polygon", "base", "optimism", "arbitrum", "gnosis"}
@@ -1160,12 +1214,16 @@ class HyperliquidIndex:
         self._client = client
         self._mids: dict[str, Any] | None = None
         self._token_pairs: dict[int, list[str]] | None = None
+        self._tokens: dict[int, dict[str, Any]] = {}
+        self._unit_evm: list[dict[str, Any]] = []
+        self._unit_limit = RateLimiter(1.5)
+        self._json_headers = {"Content-Type": "application/json", "User-Agent": "calculate-assets/1.0"}
 
     async def _info(self, payload: dict[str, Any]) -> Any:
         response = await self._client.post(
             HYPERLIQUID_INFO,
             json=payload,
-            headers={"Content-Type": "application/json", "User-Agent": "calculate-assets/1.0"},
+            headers=self._json_headers,
             timeout=20.0,
         )
         response.raise_for_status()
@@ -1180,27 +1238,338 @@ class HyperliquidIndex:
         )
         self._mids = mids if isinstance(mids, dict) else {}
         pairs: dict[int, list[str]] = defaultdict(list)
+        tokens: dict[int, dict[str, Any]] = {}
+        unit_evm: list[dict[str, Any]] = []
+        for token in (meta or {}).get("tokens") or []:
+            try:
+                index = int(token.get("index"))
+            except (TypeError, ValueError):
+                continue
+            name = str(token.get("name") or "")
+            full_name = str(token.get("fullName") or "")
+            tokens[index] = token
+            evm = token.get("evmContract") or {}
+            contract = str((evm.get("address") if isinstance(evm, dict) else "") or "").lower()
+            is_unit = full_name.lower().startswith("unit ") or name.upper() in UNIT_UNDERLYING
+            if contract.startswith("0x") and is_unit:
+                extra = 0
+                if isinstance(evm, dict):
+                    extra = int(evm.get("evm_extra_wei_decimals") or 0)
+                decimals = int(token.get("weiDecimals") or 18) + extra
+                if decimals <= 0:
+                    decimals = 18
+                unit_evm.append(
+                    {
+                        "index": index,
+                        "symbol": name,
+                        "name": full_name or name,
+                        "contract": contract,
+                        "decimals": decimals,
+                    }
+                )
         for market in (meta or {}).get("universe") or []:
-            tokens = market.get("tokens") or []
+            market_tokens = market.get("tokens") or []
             name = str(market.get("name") or "")
-            if tokens and name:
-                pairs[int(tokens[0])].append(name)
+            if market_tokens and name:
+                pairs[int(market_tokens[0])].append(name)
         self._token_pairs = dict(pairs)
+        self._tokens = tokens
+        self._unit_evm = unit_evm
+
+    def _token_name(self, coin: str, token_index: int) -> str:
+        if coin == "HYPE":
+            return "Hyperliquid"
+        info = self._tokens.get(token_index) or {}
+        full_name = str(info.get("fullName") or "")
+        if full_name:
+            return full_name
+        underlying = UNIT_UNDERLYING.get((coin or "").upper())
+        if underlying:
+            return f"Unit {underlying}"
+        return coin
 
     def _spot_price(self, coin: str, token_index: int) -> Decimal:
         symbol = (coin or "").upper()
         if symbol in HL_STABLES:
             return Decimal("1")
         mids = self._mids or {}
-        for key in (coin, symbol, f"@{token_index}"):
+        underlying = UNIT_UNDERLYING.get(symbol)
+        for key in (underlying, coin, symbol, f"@{token_index}"):
+            if not key:
+                continue
             price = to_decimal(mids.get(key))
             if price > 0:
                 return price
+        for pair_name in (self._token_pairs or {}).get(token_index, []):
+            if "/" in pair_name:
+                price = to_decimal(mids.get(pair_name))
+                if price > 0:
+                    return price
         for pair_name in (self._token_pairs or {}).get(token_index, []):
             price = to_decimal(mids.get(pair_name))
             if price > 0:
                 return price
         return Decimal("0")
+
+    def _spot_holding(
+        self,
+        address: str,
+        coin: str,
+        token_index: int,
+        amount: Decimal,
+        chain_display: str,
+        contract: str,
+        token_type: str,
+        name: str | None = None,
+        chain_name: str = "hyperliquid",
+        chain_id: int | None = None,
+    ) -> Holding:
+        price = self._spot_price(coin, token_index)
+        return Holding(
+            address=address,
+            chain_name=chain_name,
+            chain_id=chain_id,
+            chain_display=chain_display,
+            contract=contract,
+            symbol=coin,
+            name=name or self._token_name(coin, token_index),
+            amount=amount,
+            price=price if price > 0 else None,
+            value=amount * price if price > 0 else Decimal("0"),
+            native=False,
+            spam=False,
+            token_type=token_type,
+        )
+
+    @staticmethod
+    def _spot_amount(item: dict[str, Any]) -> Decimal:
+        total = to_decimal(item.get("total"))
+        hold = to_decimal(item.get("hold"))
+        supplied = to_decimal(item.get("supplied"))
+        borrowed = to_decimal(item.get("borrowed"))
+        amount = total if total > 0 else hold
+        amount += supplied
+        amount -= borrowed
+        return amount if amount > 0 else Decimal("0")
+
+    async def _rpc_call(self, rpc: str, method: str, params: list[Any]) -> Any:
+        response = await self._client.post(
+            rpc,
+            json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+            headers=self._json_headers,
+            timeout=20.0,
+        )
+        response.raise_for_status()
+        return (response.json() or {}).get("result")
+
+    async def _erc20_balance(self, rpc: str, token: str, holder: str) -> int:
+        data = BALANCE_OF_SELECTOR + "000000000000000000000000" + holder[2:].lower()
+        result = await self._rpc_call(rpc, "eth_call", [{"to": token, "data": data}, "latest"])
+        if not result or result == "0x":
+            return 0
+        return int(result, 16)
+
+    async def _erc20_balances(self, rpc: str, tokens: list[dict[str, Any]], holder: str) -> list[int]:
+        data = BALANCE_OF_SELECTOR + "000000000000000000000000" + holder[2:].lower()
+        batch = [
+            {
+                "jsonrpc": "2.0",
+                "id": index,
+                "method": "eth_call",
+                "params": [{"to": token["contract"], "data": data}, "latest"],
+            }
+            for index, token in enumerate(tokens)
+        ]
+        try:
+            response = await self._client.post(rpc, json=batch, headers=self._json_headers, timeout=20.0)
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, json.JSONDecodeError):
+            payload = None
+        balances = [0] * len(tokens)
+        if isinstance(payload, list) and len(payload) == len(tokens):
+            by_id = {item.get("id"): item for item in payload if isinstance(item, dict)}
+            for index in range(len(tokens)):
+                result = (by_id.get(index) or {}).get("result")
+                if result and result != "0x":
+                    balances[index] = int(result, 16)
+            return balances
+        for index, token in enumerate(tokens):
+            try:
+                balances[index] = await self._erc20_balance(rpc, token["contract"], holder)
+            except (httpx.HTTPError, ValueError, TypeError):
+                balances[index] = 0
+        return balances
+
+    async def _native_balance(self, rpc: str, holder: str) -> int:
+        result = await self._rpc_call(rpc, "eth_getBalance", [holder, "latest"])
+        if not result or result == "0x":
+            return 0
+        return int(result, 16)
+
+    async def _unit_get(self, path: str) -> dict[str, Any]:
+        url = f"{HYPERUNIT_API}{path}"
+        last_error: Exception | None = None
+        for attempt in range(5):
+            await self._unit_limit.wait()
+            try:
+                response = await self._client.get(
+                    url,
+                    headers={"Accept": "application/json", "User-Agent": "calculate-assets/1.0"},
+                    timeout=20.0,
+                )
+            except httpx.HTTPError as exc:
+                last_error = exc
+                await asyncio.sleep(1.2 * (attempt + 1))
+                continue
+            if response.status_code == 429:
+                await asyncio.sleep(1.5 * (attempt + 1))
+                continue
+            if response.status_code in {400, 404}:
+                return {}
+            try:
+                response.raise_for_status()
+                payload = response.json()
+            except (httpx.HTTPError, json.JSONDecodeError) as exc:
+                last_error = exc
+                await asyncio.sleep(1.2 * (attempt + 1))
+                continue
+            return payload if isinstance(payload, dict) else {}
+        if last_error:
+            print(f"  Unit lookup failed: {last_error}", file=sys.stderr)
+        return {}
+
+    async def _unit_operations(self, address: str) -> dict[str, Any]:
+        return await self._unit_get(f"/operations/{address}")
+
+    async def _unit_eth_deposit_address(self, address: str) -> str | None:
+        payload = await self._unit_get(f"/gen/ethereum/hyperliquid/eth/{address}")
+        proto = str(payload.get("address") or "")
+        if ADDRESS_RE.fullmatch(proto):
+            return proto
+        return None
+
+    def _unit_net_amount(self, op: dict[str, Any]) -> Decimal:
+        asset = str(op.get("asset") or "").lower()
+        decimals = UNIT_ASSET_DECIMALS.get(asset, 18)
+        source = to_decimal(op.get("sourceAmount"))
+        fees = to_decimal(op.get("destinationFeeAmount")) + to_decimal(op.get("sweepFeeAmount"))
+        net = source - fees
+        if net <= 0:
+            net = source
+        return human_amount(net, decimals)
+
+    def _token_index_for_symbol(self, symbol: str) -> int:
+        wanted = (symbol or "").upper()
+        for index, token in self._tokens.items():
+            if str(token.get("name") or "").upper() == wanted:
+                return index
+        return 0
+
+    async def _unit_and_evm_holdings(self, address: str) -> list[Holding]:
+        holdings: list[Holding] = []
+        if self._unit_evm:
+            try:
+                raw_balances = await self._erc20_balances(HYPEREVM_RPC, self._unit_evm, address)
+            except (httpx.HTTPError, ValueError, TypeError):
+                raw_balances = []
+            for token, raw in zip(self._unit_evm, raw_balances):
+                amount = human_amount(raw, token["decimals"])
+                if amount <= 0:
+                    continue
+                holdings.append(
+                    self._spot_holding(
+                        address,
+                        token["symbol"],
+                        token["index"],
+                        amount,
+                        "HyperEVM",
+                        token["contract"],
+                        "unit_evm",
+                        name=token["name"] or token["symbol"],
+                        chain_name="hyperevm",
+                        chain_id=999,
+                    )
+                )
+
+        unit = await self._unit_operations(address)
+        protocol_eth: list[str] = []
+        for rec in unit.get("addresses") or []:
+            if not isinstance(rec, dict):
+                continue
+            coin_type = str(rec.get("sourceCoinType") or "").lower()
+            dest = str(rec.get("destinationChain") or "").lower()
+            proto = str(rec.get("address") or "")
+            if dest == "hyperliquid" and coin_type in {"ethereum", "eth"} and ADDRESS_RE.fullmatch(proto):
+                protocol_eth.append(proto)
+
+        if not protocol_eth:
+            generated = await self._unit_eth_deposit_address(address)
+            if generated:
+                protocol_eth.append(generated)
+
+        credited_eth = Decimal("0")
+        for proto in dict.fromkeys(protocol_eth):
+            try:
+                wei = await self._native_balance(ETH_RPC, proto)
+            except (httpx.HTTPError, ValueError, TypeError):
+                continue
+            amount = human_amount(wei, 18)
+            if amount <= 0:
+                continue
+            credited_eth += amount
+            ueth_index = self._token_index_for_symbol("UETH")
+            holdings.append(
+                self._spot_holding(
+                    address,
+                    "UETH",
+                    ueth_index,
+                    amount,
+                    "Hyperliquid Unit",
+                    f"unit:eth:{proto.lower()}",
+                    "unit_deposit",
+                    name="Unit ETH (deposit address)",
+                )
+            )
+
+        pending_by_asset: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+        for op in unit.get("operations") or []:
+            if not isinstance(op, dict):
+                continue
+            dest = str(op.get("destinationChain") or "").lower()
+            source = str(op.get("sourceChain") or "").lower()
+            state = str(op.get("state") or "")
+            if dest != "hyperliquid" or source == "hyperliquid":
+                continue
+            if state not in UNIT_PENDING_STATES:
+                continue
+            asset = str(op.get("asset") or "").lower()
+            amount = self._unit_net_amount(op)
+            if amount <= 0:
+                continue
+            pending_by_asset[asset] += amount
+
+        if pending_by_asset.get("eth", Decimal("0")) <= credited_eth:
+            pending_by_asset.pop("eth", None)
+        else:
+            pending_by_asset["eth"] -= credited_eth
+
+        for asset, amount in pending_by_asset.items():
+            ticker = UNIT_ASSET_TICKER.get(asset, asset.upper())
+            token_index = self._token_index_for_symbol(ticker)
+            holdings.append(
+                self._spot_holding(
+                    address,
+                    ticker,
+                    token_index,
+                    amount,
+                    "Hyperliquid Unit",
+                    f"unit:pending:{asset}",
+                    "unit_deposit",
+                    name=f"Unit {ticker} (pending deposit)",
+                )
+            )
+        return holdings
 
     async def fetch_address(self, address: str) -> tuple[list[Holding], ChainFailure | None]:
         if not ADDRESS_RE.fullmatch(address):
@@ -1218,27 +1587,41 @@ class HyperliquidIndex:
         holdings: list[Holding] = []
         for item in (spot or {}).get("balances") or []:
             coin = str(item.get("coin") or "UNKNOWN")
-            amount = to_decimal(item.get("total"))
+            amount = self._spot_amount(item)
             if amount <= 0:
                 continue
             token_index = int(item.get("token") or 0)
-            price = self._spot_price(coin, token_index)
-            full_name = coin if coin != "HYPE" else "Hyperliquid"
             holdings.append(
-                Holding(
-                    address=address,
-                    chain_name="hyperliquid",
-                    chain_id=None,
-                    chain_display="Hyperliquid Spot",
-                    contract=f"spot:{token_index}:{coin}",
-                    symbol=coin,
-                    name=full_name,
-                    amount=amount,
-                    price=price if price > 0 else None,
-                    value=amount * price if price > 0 else Decimal("0"),
-                    native=False,
-                    spam=False,
-                    token_type="spot",
+                self._spot_holding(
+                    address,
+                    coin,
+                    token_index,
+                    amount,
+                    "Hyperliquid Spot",
+                    f"spot:{token_index}:{coin}",
+                    "spot",
+                )
+            )
+        for item in (spot or {}).get("evmEscrows") or (spot or {}).get("evm_escrows") or []:
+            if not isinstance(item, dict):
+                continue
+            coin = str(item.get("coin") or "UNKNOWN")
+            amount = self._spot_amount(item)
+            if amount <= 0:
+                amount = to_decimal(item.get("amount") or item.get("balance") or item.get("total"))
+            if amount <= 0:
+                continue
+            token_index = int(item.get("token") or 0)
+            holdings.append(
+                self._spot_holding(
+                    address,
+                    coin,
+                    token_index,
+                    amount,
+                    "Hyperliquid Spot",
+                    f"escrow:{token_index}:{coin}",
+                    "spot",
+                    name=f"{self._token_name(coin, token_index)} (EVM escrow)",
                 )
             )
 
@@ -1334,11 +1717,15 @@ class HyperliquidIndex:
                     token_type="vault",
                 )
             )
+        try:
+            holdings.extend(await self._unit_and_evm_holdings(address))
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            print(f"  Unit/HyperEVM lookup failed: {exc}", file=sys.stderr)
         return holdings, None
 
 
 def keep_hyperliquid_holding(holding: Holding, min_value: Decimal) -> bool:
-    if holding.token_type == "perp":
+    if holding.token_type in {"perp", "unit_deposit"}:
         return holding.amount > 0
     return holding.value >= min_value or (holding.amount > 0 and holding.value == 0)
 
@@ -1619,7 +2006,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--no-hyperliquid",
         action="store_true",
-        help="Skip Hyperliquid DEX spot, perps, and vaults",
+        help="Skip Hyperliquid DEX spot, perps, vaults, and Unit deposits",
     )
     parser.add_argument("--min-value", type=float, default=0.01, help="Hide holdings worth less than this")
     parser.add_argument(
